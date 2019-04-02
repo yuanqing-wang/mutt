@@ -30,6 +30,16 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
 
+# ===========================================================================
+# imports
+# ===========================================================================
+import tensorflow as tf
+tf.enable_eager_execution()
+
+# ===========================================================================
+# utility classes
+# ===========================================================================
+
 class Regression(tf.keras.Model):
     def __init__(self, output_dim = 90):
         super(Regression, self).__init__()

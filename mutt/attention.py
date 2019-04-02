@@ -30,7 +30,15 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
 
+# ===========================================================================
+# imports
+# ===========================================================================
+import tensorflow as tf
+tf.enable_eager_execution()
 
+# ===========================================================================
+# utility classes
+# ===========================================================================
 
 class Attention(tf.keras.Model):
     """

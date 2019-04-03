@@ -7,3 +7,4 @@ mutt
 
 from . import attention
 from . import conv
+from . import regression

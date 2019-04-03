@@ -164,71 +164,122 @@ class Flow(Trainable):
 
     def _train(self):
         """
-        training
+        training, and test using 5-fold cross validation
 
         """
-        # get the dataset
-        ds = get_pinned_object(ds_)
-        ds_te = get_pinned_object(ds_te_)
+        # init r2
+        r2s = []
 
-        # ~~~~~~~~~~~~~~~~~
-        # train for a batch
-        # ~~~~~~~~~~~~~~~~~
-        # enumerate
-        
-        for batch, (xs, ys) in enumerate(ds):
-            with tf.GradientTape(persistent=True) as tape: # grad tape
-                # flow
+        # =====================================================================
+        # data preparation
+        # =====================================================================
+
+        # split
+        n_samples = df.shape[0]
+        n_te = int(0.2 * n_samples)
+        df = df.sample(n_samples)
+
+        # five fold cross-validation
+        for idx in range(5):
+            # test: [idx * n_te: (idx + 1) * n_te]
+            # train : [0: idx * n_te, (idx + 1) * n_te:]
+            x_tr = np.array(
+                [[TRANSLATION[ch] for ch in list(seq)] for seq \
+                    in df.values[np.r_[0: idx * n_te, (idx + 1) * n_te:], -1]\
+                    .flatten().tolist()],
+                dtype=np.int32)
+            y_tr = np.array(df.values[np.r_[0: idx * n_te, (idx + 1) * n_te:],
+                    8:-1],
+                dtype=np.float32)
+
+            x_te = np.array(
+                [[TRANSLATION[ch] for ch in list(seq)] for seq \
+                    in df.values[np.r_[idx * n_te: (idx + 1) * n_te], -1]\
+                    .flatten().tolist()],
+                dtype=np.int32)
+
+            y_te = np.array(df.values[np.r_[idx * n_te: (idx + 1) * n_te],
+                    8:-1],
+                dtype=np.float32)
+
+            # one-hot encoding
+            x_tr = tf.one_hot(tf.convert_to_tensor(x_tr), 5,
+                dtype=tf.int64)
+            y_tr = tf.convert_to_tensor(y_tr)
+            x_te = tf.one_hot(tf.convert_to_tensor(x_te), 5,
+                dtype=tf.int64)
+            y_te = tf.convert_to_tensor(y_te)
+
+            # normalize
+            y_mean, y_var = tf.nn.moments(y_tr, axes=[0])
+            y_tr = tf.div(y_tr - y_mean, tf.sqrt(y_var))
+            y_te = tf.div(y_te - y_mean, tf.sqrt(y_var))
+
+            # put into ds
+            ds = tf.data.Dataset.from_tensor_slices((x_tr, y_tr))
+            ds = ds.apply(tf.contrib.data.batch_and_drop_remainder(128))
+            ds = ds.shuffle(y_tr.shape[0])
+            ds_te = tf.data.Dataset.from_tensor_slices((x_te, y_te))
+            ds_te = ds_te.apply(tf.contrib.data.batch_and_drop_remainder(128))
+
+
+            # ~~~~~~~~~~~~~~~~~
+            # train for a batch
+            # ~~~~~~~~~~~~~~~~~
+            # enumerate
+
+            for batch, (xs, ys) in enumerate(ds):
+                with tf.GradientTape(persistent=True) as tape: # grad tape
+                    # flow
+                    x = self.encoder1(xs)
+                    x = self.attention(x, x)
+                    x = self.encoder2(x)
+                    x = self.encoder3(x)
+                    y_bar = self.regression(x)
+                    loss = tf.losses.mean_squared_error(ys, y_bar)
+
+                # backprop
+                variables = self.encoder1.variables\
+                    + self.attention.variables\
+                    + self.encoder2.variables\
+                    + self.encoder3.variables\
+                    + self.regression.variables
+
+                gradients = tape.gradient(loss, variables)
+
+                optimizer.apply_gradients(
+                    zip(gradients, variables),
+                    tf.train.get_or_create_global_step())
+
+            # increment
+            self.iteration += 1
+
+            # ~~~~
+            # test
+            # ~~~~
+            # init
+            y_true = None
+            y_pred = None
+            for batch, (xs, ys) in enumerate(ds_te): # loop through test data
                 x = self.encoder1(xs)
-                x = self.attention(x, x)
+                x = self.attention1(x, x)
                 x = self.encoder2(x)
                 x = self.encoder3(x)
                 y_bar = self.regression(x)
-                loss = tf.losses.mean_squared_error(ys, y_bar)
 
-            # backprop
-            variables = self.encoder1.variables\
-                + self.attention.variables\
-                + self.encoder2.variables\
-                + self.encoder3.variables\
-                + self.regression.variables
+                # put results in the array
+                if type(y_true) == type(None):
+                    y_true = ys.numpy()
+                else:
+                    y_true = np.concatenate([y_true, ys], axis=0)
 
-            gradients = tape.gradient(loss, variables)
+                if type(y_pred) == type(None):
+                    y_pred = y_bar.numpy()
+                else:
+                    y_pred = np.concatenate([y_pred, y_bar], axis=0)
 
-            optimizer.apply_gradients(
-                zip(gradients, variables),
-                tf.train.get_or_create_global_step())
-
-        # increment
-        self.iteration += 1
-
-        # ~~~~
-        # test
-        # ~~~~
-        # init
-        y_true = None
-        y_pred = None
-        for batch, (xs, ys) in enumerate(ds_te): # loop through test data
-            x = self.encoder1(xs)
-            x = self.attention1(x, x)
-            x = self.encoder2(x)
-            x = self.encoder3(x)
-            y_bar = self.regression(x)
-
-            # put results in the array
-            if type(y_true) == type(None):
-                y_true = ys.numpy()
-            else:
-                y_true = np.concatenate([y_true, ys], axis=0)
-
-            if type(y_pred) == type(None):
-                y_pred = y_bar.numpy()
-            else:
-                y_pred = np.concatenate([y_pred, y_bar], axis=0)
-
-        r2s = []
-        for idx in range(y_true.shape[1]):
-            r2s.append(r2_score(y_true[:, idx], y_pred[:, idx]))
+            for idx in range(y_true.shape[1]):
+                r2s.append(r2_score(y_true[:, idx], y_pred[:, idx]))
 
         return {"r2": np.mean(r2s)} # return r2
 
@@ -303,53 +354,12 @@ if __name__ == "__main__":
     # =========================================================================
     # data preparation
     # =========================================================================
-
-    # prepare data
     df = pd.read_csv('ImmGenATAC18_AllOCRsInfo.csv')
     df = df[df['chrom'] == 'chr1']
     record = SeqIO.read('chr1.fa', 'fasta')
     df['seq'] = df['Summit'].apply(
         lambda x: summit2seq(record, x, width=250))
-
-    # split
-    n_samples = df.shape[0]
-    n_tr = int(0.8 * n_samples)
-    df = df.sample(n_samples)
-    x_tr = np.array(
-        [[TRANSLATION[ch] for ch in list(seq)] for seq \
-            in df.values[:n_tr, -1].flatten().tolist()],
-        dtype=np.int32)
-    y_tr = np.array(df.values[:n_tr, 8:-1], dtype=np.float32)
-    x_te = np.array(
-        [[TRANSLATION[ch] for ch in list(seq)] for seq \
-            in df.values[n_tr:, -1].flatten().tolist()],
-        dtype=np.int32)
-    y_te = np.array(df.values[n_tr:, 8:-1], dtype=np.float32)
-
-    # one-hot encoding
-    x_tr = tf.one_hot(tf.convert_to_tensor(x_tr), 5,
-        dtype=tf.int64)
-    y_tr = tf.convert_to_tensor(y_tr)
-    x_te = tf.one_hot(tf.convert_to_tensor(x_te), 5,
-        dtype=tf.int64)
-    y_te = tf.convert_to_tensor(y_te)
-
-    # normalize
-    y_mean, y_var = tf.nn.moments(y_tr, axes=[0])
-    y_tr = tf.div(y_tr - y_mean, tf.sqrt(y_var))
-    y_te = tf.div(y_te - y_mean, tf.sqrt(y_var))
-
-    # put into ds
-    ds_ = tf.data.Dataset.from_tensor_slices((x_tr, y_tr))
-    ds_ = ds_.apply(tf.contrib.data.batch_and_drop_remainder(128))
-    ds_ = ds_.shuffle(y_tr.shape[0])
-    ds_te_ = tf.data.Dataset.from_tensor_slices((x_te, y_te))
-    ds_te_ = ds_te_.apply(tf.contrib.data.batch_and_drop_remainder(128))
-
-    # pin it
-    ds_ = pin_in_object_store(ds_)
-    ds_te_ = pin_in_object_store(ds_te_)
-
+    
     # =========================================================================
     # define search method
     # =========================================================================

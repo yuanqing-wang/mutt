@@ -1,0 +1,6 @@
+"""
+mutt
+
+"""
+
+from .. import mutt

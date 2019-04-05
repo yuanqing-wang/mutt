@@ -167,6 +167,8 @@ class Flow(Trainable):
         training, and test using 5-fold cross validation
 
         """
+        global df
+
         # init r2
         r2s = []
 
@@ -201,7 +203,7 @@ class Flow(Trainable):
             y_te = np.array(df.values[np.r_[idx * n_te: (idx + 1) * n_te],
                     8:-1],
                 dtype=np.float32)
-
+            
             # one-hot encoding
             x_tr = tf.one_hot(tf.convert_to_tensor(x_tr), 5,
                 dtype=tf.int64)
@@ -217,11 +219,12 @@ class Flow(Trainable):
 
             # put into ds
             ds = tf.data.Dataset.from_tensor_slices((x_tr, y_tr))
-            ds = ds.apply(tf.contrib.data.batch_and_drop_remainder(128))
+            ds = ds.batch(128, True)
             ds = ds.shuffle(y_tr.shape[0])
-            ds_te = tf.data.Dataset.from_tensor_slices((x_te, y_te))
-            ds_te = ds_te.apply(tf.contrib.data.batch_and_drop_remainder(128))
 
+            ds_te = tf.data.Dataset.from_tensor_slices((x_te, y_te))
+            ds_te = ds_te.batch(128, True)
+            ds_te = ds_te.apply(tf.contrib.data.batch_and_drop_remainder(128))
 
             # ~~~~~~~~~~~~~~~~~
             # train for a batch
@@ -231,6 +234,7 @@ class Flow(Trainable):
             for batch, (xs, ys) in enumerate(ds):
                 with tf.GradientTape(persistent=True) as tape: # grad tape
                     # flow
+                    print(self.encoder1.layers[0].weights)
                     x = self.encoder1(xs)
                     x = self.attention(x, x)
                     x = self.encoder2(x)

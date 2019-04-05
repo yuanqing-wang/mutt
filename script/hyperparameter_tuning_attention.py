@@ -178,7 +178,7 @@ class Flow(Trainable):
         # one-hot encoding
         x_all = tf.one_hot(tf.convert_to_tensor(x_all), 5,
             dtype=tf.int64)
-        y_all = tf.convert_to_tensor(y_al)
+        y_all = tf.convert_to_tensor(y_all)
 
 
         # normalize

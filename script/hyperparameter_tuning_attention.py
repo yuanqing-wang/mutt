@@ -157,10 +157,39 @@ class Flow(Trainable):
         config : dict
             configuration of hyperparameters
         """
+        global df
+
         # init iteration
         self.iteration = 0
         self.build(config)
 
+        # get sample size
+        self.n_sample = df.shape[0]
+
+        # get ds
+        x_all = np.array(
+            [[TRANSLATION[ch] for ch in list(seq)] for seq \
+                in df.values[:, -1]\
+                .flatten().tolist()],
+            dtype=np.int32)
+        y_all = np.array(df.values[:, 8:-1],
+            dtype=np.float32)
+
+        # one-hot encoding
+        x_all = tf.one_hot(tf.convert_to_tensor(x_all), 5,
+            dtype=tf.int64)
+        y_all = tf.convert_to_tensor(y_al)
+
+
+        # normalize
+        y_mean, y_var = tf.nn.moments(y_all, axes=[0])
+        y_all = tf.div(y_all - y_mean, tf.sqrt(y_var))
+
+        # put into ds
+        ds = tf.data.Dataset.from_tensor_slices((x_all, y_all))
+        # ds = ds.batch(128, True)
+        # ds = ds.shuffle(y_tr.shape[0])
+        self.ds = ds # point ds to class ref
 
     def _train(self):
         """
@@ -177,61 +206,23 @@ class Flow(Trainable):
         # =====================================================================
 
         # split
-        n_samples = df.shape[0]
-        n_te = int(0.2 * n_samples)
-        df = df.sample(n_samples)
+        n_te = int(0.2 * self.n_samples)
+        ds = self.ds.shuffle(self.n_samples)
 
         # five fold cross-validation
         for idx in range(5):
             # test: [idx * n_te: (idx + 1) * n_te]
             # train : [0: idx * n_te, (idx + 1) * n_te:]
-            x_tr = np.array(
-                [[TRANSLATION[ch] for ch in list(seq)] for seq \
-                    in df.values[np.r_[0: idx * n_te, (idx + 1) * n_te:], -1]\
-                    .flatten().tolist()],
-                dtype=np.int32)
-            y_tr = np.array(df.values[np.r_[0: idx * n_te, (idx + 1) * n_te:],
-                    8:-1],
-                dtype=np.float32)
-
-            x_te = np.array(
-                [[TRANSLATION[ch] for ch in list(seq)] for seq \
-                    in df.values[np.r_[idx * n_te: (idx + 1) * n_te], -1]\
-                    .flatten().tolist()],
-                dtype=np.int32)
-
-            y_te = np.array(df.values[np.r_[idx * n_te: (idx + 1) * n_te],
-                    8:-1],
-                dtype=np.float32)
-            
-            # one-hot encoding
-            x_tr = tf.one_hot(tf.convert_to_tensor(x_tr), 5,
-                dtype=tf.int64)
-            y_tr = tf.convert_to_tensor(y_tr)
-            x_te = tf.one_hot(tf.convert_to_tensor(x_te), 5,
-                dtype=tf.int64)
-            y_te = tf.convert_to_tensor(y_te)
-
-            # normalize
-            y_mean, y_var = tf.nn.moments(y_tr, axes=[0])
-            y_tr = tf.div(y_tr - y_mean, tf.sqrt(y_var))
-            y_te = tf.div(y_te - y_mean, tf.sqrt(y_var))
-
-            # put into ds
-            ds = tf.data.Dataset.from_tensor_slices((x_tr, y_tr))
-            ds = ds.batch(128, True)
-            ds = ds.shuffle(y_tr.shape[0])
-
-            ds_te = tf.data.Dataset.from_tensor_slices((x_te, y_te))
-            ds_te = ds_te.batch(128, True)
-            ds_te = ds_te.apply(tf.contrib.data.batch_and_drop_remainder(128))
+            ds_tr = ds.take(idx * n_te).concatenate(
+                ds.skip((idx + 1) * n_te).take((4 - idx) * n_te))
+            ds_te = ds.skip(idx * n_te).take((idx + 1) * n_te)
 
             # ~~~~~~~~~~~~~~~~~
             # train for a batch
             # ~~~~~~~~~~~~~~~~~
             # enumerate
 
-            for batch, (xs, ys) in enumerate(ds):
+            for batch, (xs, ys) in enumerate(ds_tr):
                 with tf.GradientTape(persistent=True) as tape: # grad tape
                     # flow
                     print(self.encoder1.layers[0].weights)
@@ -363,7 +354,7 @@ if __name__ == "__main__":
     record = SeqIO.read('chr1.fa', 'fasta')
     df['seq'] = df['Summit'].apply(
         lambda x: summit2seq(record, x, width=250))
-    
+
     # =========================================================================
     # define search method
     # =========================================================================

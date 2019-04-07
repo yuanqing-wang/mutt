@@ -108,7 +108,7 @@ class Flow(object):
         """
 
         config = dict(zip(config_keys, single_config_values))
-
+        print(config)
         self.encoder1 = conv.ConvNet([
                 'C_%s_%s' % (
                     config['conv1_unit'],
@@ -173,7 +173,7 @@ class Flow(object):
         # one-hot encoding
         x_all = tf.one_hot(tf.convert_to_tensor(x_all), 5,
             dtype=tf.int64)
-        y_all = tf.convert_to_tensor(y_al)
+        y_all = tf.convert_to_tensor(y_all)
 
 
         # normalize
@@ -199,8 +199,8 @@ class Flow(object):
         # =====================================================================
 
         # split
-        n_te = int(0.2 * self.n_samples)
-        ds = self.ds.shuffle(self.n_samples)
+        n_te = int(0.2 * self.n_sample)
+        ds = self.ds.shuffle(self.n_sample)
 
         # five fold cross-validation
         for idx in range(5):
@@ -209,6 +209,9 @@ class Flow(object):
             ds_tr = ds.take(idx * n_te).concatenate(
                 ds.skip((idx + 1) * n_te).take((4 - idx) * n_te))
             ds_te = ds.skip(idx * n_te).take((idx + 1) * n_te)
+            
+            ds_tr = ds_tr.batch(128, True)
+            ds_te = ds_te.batch(128, True)
 
             # ~~~~~~~~~~~~~~~~~
             # train for a batch

@@ -206,8 +206,8 @@ class Flow(Trainable):
         # =====================================================================
 
         # split
-        n_te = int(0.2 * self.n_samples)
-        ds = self.ds.shuffle(self.n_samples)
+        n_te = int(0.2 * self.n_sample)
+        ds = self.ds.shuffle(self.n_sample)
 
         # five fold cross-validation
         for idx in range(5):
@@ -216,6 +216,10 @@ class Flow(Trainable):
             ds_tr = ds.take(idx * n_te).concatenate(
                 ds.skip((idx + 1) * n_te).take((4 - idx) * n_te))
             ds_te = ds.skip(idx * n_te).take((idx + 1) * n_te)
+            
+            # batch ds
+            ds_tr = ds_tr.batch(128, True)
+            ds_te = ds_te.batch(128, True)
 
             # ~~~~~~~~~~~~~~~~~
             # train for a batch

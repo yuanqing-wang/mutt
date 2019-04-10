@@ -41,6 +41,10 @@ from ray.tune import grid_search, Trainable, sample_from
 from ray.tune.schedulers import *
 from ray.tune.util import pin_in_object_store, get_pinned_object
 import tensorflow as tf
+# import horovod.tensorflow as hvd
+# hvd.init()
+# config = tf.ConfigProto()
+# config.gpu_options.visible_device_list = str(hvd.local_rank())
 tf.enable_eager_execution()
 from sklearn.metrics import r2_score
 from Bio import SeqIO
@@ -110,9 +114,6 @@ class Flow(Trainable):
         config : dict
             configuration of hyperparameters
         """
-        print('=================')
-        print(config)
-        print('=================')
         self.encoder1 = conv.ConvNet([
                 'C_%s_%s' % (
                     config['conv1_unit'],
@@ -136,16 +137,19 @@ class Flow(Trainable):
             config['attention_head'])
 
         self.encoder4 = conv.ConvNet([
-                'C_%s_%s_%s' % (
+                'C_%s_%s' % (
                     config['conv4_unit'],
-                    config['conv4_kernel_size'],
-                    config['conv4_dilation_rate']),
-                config['conv4_activation']])
+                    config['conv4_kernel_size']),
+                config['conv4_activation'],
+                'F',
+                'D_512'])
 
         self.regression = regression.Regression()
 
-        self.optimizer = tf.train.AdamOptimizer(config["learning_rate"])
+        self.optimizer = tf.train.AdamOptimizer(
+            config["learning_rate"])
 
+        # self.optimizer = hvd.DistributedOptimizer(optimizer)
 
 
     def _setup(self, config):
@@ -177,8 +181,8 @@ class Flow(Trainable):
 
         # one-hot encoding
         x_all = tf.one_hot(tf.convert_to_tensor(x_all), 5,
-            dtype=tf.int64)
-        y_all = tf.convert_to_tensor(y_all)
+            dtype=tf.float32)
+        y_all = tf.convert_to_tensor(y_all, dtype=tf.float32)
 
 
         # normalize
@@ -229,11 +233,11 @@ class Flow(Trainable):
             for batch, (xs, ys) in enumerate(ds_tr):
                 with tf.GradientTape(persistent=True) as tape: # grad tape
                     # flow
-                    print(self.encoder1.layers[0].weights)
                     x = self.encoder1(xs)
-                    x = self.attention(x, x)
                     x = self.encoder2(x)
                     x = self.encoder3(x)
+                    x = self.attention(x, x)
+                    x = self.encoder4(x)
                     y_bar = self.regression(x)
                     loss = tf.losses.mean_squared_error(ys, y_bar)
 
@@ -242,11 +246,12 @@ class Flow(Trainable):
                     + self.attention.variables\
                     + self.encoder2.variables\
                     + self.encoder3.variables\
+                    + self.encoder4.variables\
                     + self.regression.variables
 
                 gradients = tape.gradient(loss, variables)
 
-                optimizer.apply_gradients(
+                self.optimizer.apply_gradients(
                     zip(gradients, variables),
                     tf.train.get_or_create_global_step())
 
@@ -261,9 +266,10 @@ class Flow(Trainable):
             y_pred = None
             for batch, (xs, ys) in enumerate(ds_te): # loop through test data
                 x = self.encoder1(xs)
-                x = self.attention1(x, x)
+                x = self.attention(x, x)
                 x = self.encoder2(x)
                 x = self.encoder3(x)
+                x = self.encoder4(x)
                 y_bar = self.regression(x)
 
                 # put results in the array
@@ -293,6 +299,8 @@ class Flow(Trainable):
         """
         # get a temp path
         dirpath = tempfile.mkdtemp()
+        os.chdir(dirpath)
+        os.system('mkdir models')
 
         # save the weights
         self.encoder1.save_weights(os.path.join(dirpath,
@@ -303,11 +311,12 @@ class Flow(Trainable):
             'models/encoder2.h5'))
         self.encoder3.save_weights(os.path.join(dirpath,
             'models/encoder3.h5'))
+        self.encoder4.save_weights(os.path.join(dirpath,
+            'models/encoder4.h5'))
         self.regression.save_weights(os.path.join(dirpath,
             'models/regression.h5'))
 
         # compress
-        os.chdir(dirpath)
         os.system('zip -r models.zip models')
         os.system('mv models.zip ' + checkpoint_dir)
 
@@ -344,6 +353,8 @@ class Flow(Trainable):
             'models/encoder2.h5'))
         self.encoder3.load_weights(os.path.join(dirpath,
             'models/encoder3.h5'))
+        self.encoder4.load_weights(os.path.join(dirpath,
+            'models/encoder4.h5'))
         self.regression.load_weights(os.path.join(dirpath,
             'models/regression.h5'))
 
@@ -399,7 +410,6 @@ if __name__ == "__main__":
         # with dilation
         "conv4_unit": s([64, 128, 256]),
         "conv4_kernel_size": s([4, 6, 8, 10, 12]),
-        "conv4_dilation_rate": s([1, 2, 4, 8]),
         "conv4_activation": s(['sigmoid', 'tanh', 'elu']),
 
         # flatten layer here
@@ -421,7 +431,7 @@ if __name__ == "__main__":
     }
 
     # init
-    ray.init()
+    ray.init(num_gpus=2)
 
     # scheduler
     pbt_scheduler = PopulationBasedTraining(

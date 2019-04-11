@@ -127,4 +127,4 @@ class Attention(tf.keras.Model):
         return attention_output
 
     def __call__(self, x, y):
-        return self._call(self, x, y)
+        return self._call(x, y)

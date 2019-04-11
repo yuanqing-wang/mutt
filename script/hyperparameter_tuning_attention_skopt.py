@@ -36,12 +36,13 @@ SOFTWARE.
 # infrastructure
 from __future__ import absolute_import
 from skopt import gp_minimize
+from skopt.space import Categorical
 import tensorflow as tf
-import horovod.tensorflow as hvd
-hvd.init()
-config = tf.ConfigProto()
-config.gpu_options.visible_device_list = str(hvd.local_rank())
-tf.enable_eager_execution(config=config)
+# import horovod.tensorflow as hvd
+# hvd.init()
+# config = tf.ConfigProto()
+# config.gpu_options.visible_device_list = str(hvd.local_rank())
+tf.enable_eager_execution()
 from sklearn.metrics import r2_score
 from Bio import SeqIO
 import numpy as np
@@ -110,17 +111,10 @@ class Flow(object):
         config : dict
             configuration of hyperparameters
         """
+        global config_keys
 
         config = dict(zip(config_keys, single_config_values))
-    def build(self, config):
-        """
-        build the models with parameters
 
-        Parameters
-        ----------
-        config : dict
-            configuration of hyperparameters
-        """
         self.encoder1 = conv.ConvNet([
                 'C_%s_%s' % (
                     config['conv1_unit'],
@@ -154,9 +148,10 @@ class Flow(object):
         self.regression = regression.Regression()
 
         optimizer = tf.train.AdamOptimizer(
-            config["learning_rate"] * hvd.local_rank())
-
-        self.optimizer = hvd.DistributedOptimizer(optimizer)
+            config["learning_rate"])
+        
+        self.optimizer = optimizer
+        # self.optimizer = hvd.DistributedOptimizer(optimizer)
 
     def _setup(self, config_values):
         """
@@ -170,11 +165,9 @@ class Flow(object):
 
         global df
 
-        global df
-
         # init iteration
         self.iteration = 0
-        self.build(config)
+        self.build(config_values)
 
         # get sample size
         self.n_sample = df.shape[0]
@@ -276,9 +269,9 @@ class Flow(object):
             y_pred = None
             for batch, (xs, ys) in enumerate(ds_te): # loop through test data
                 x = self.encoder1(xs)
-                x = self.attention(x, x)
                 x = self.encoder2(x)
                 x = self.encoder3(x)
+                x = self.attention(x, x)
                 x = self.encoder4(x)
                 y_bar = self.regression(x)
 
@@ -384,14 +377,14 @@ if __name__ == "__main__":
     # =========================================================================
     # define search method
     # =========================================================================
-    s = lambda x: x # for population
+    # s = lambda x: x # for population
     # s = tune.grid_search # for grid search
-
+    s = lambda x: Categorical(x)
     # =========================================================================
     # define search space
     # =========================================================================
 
-    config = {
+    config_ = {
         # ~~~~~~~~~~~~~~~~~~
         # architecture specs
         # ~~~~~~~~~~~~~~~~~~
@@ -443,8 +436,8 @@ if __name__ == "__main__":
     }
 
     # seperate the dict
-    config_values = config.values()
-    config_keys = config.keys()
+    config_values = config_.values()
+    config_keys = config_.keys()
 
     def obj_func(single_config_values):
         flow = Flow()

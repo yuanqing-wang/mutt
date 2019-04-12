@@ -95,14 +95,14 @@ def read_chr(fasta_dir, bigwig_dir, window_width):
     chr_name = fasta_dir.split('.')[0]
 
     # get the record
-    record = SeqIO.read(fast_dir, 'fasta')
+    record = SeqIO.read(fasta_dir, 'fasta')
 
     # read the accesibility data
     bw = pyBigWig.open(bigwig_dir)
 
     # handle the idxs
     seq_len = len(record)
-    assert seq_len = int(re.findall(str(bw.chroms(chr_name))[0]))
+    assert seq_len == int(re.findall(str(bw.chroms(chr_name))[0]))
     idxs = range(len(seq_len - window_width))
     idxs_ds = tf.data.Dataset.from_tensor_slices(
         tf.convert_to_tensor(idxs))
@@ -181,8 +181,8 @@ class Flow(object):
                 config['conv3_activation']])
 
         self.attention = attention.Attention(
-            config['attention_units'],
-            config['attention_head'])
+            int(config['attention_units']),
+            int(config['attention_head']))
 
         self.encoder4 = conv.ConvNet([
                 'C_%s_%s' % (
@@ -195,7 +195,7 @@ class Flow(object):
         self.regression = regression.Regression()
 
         optimizer = tf.train.AdamOptimizer(
-            config["learning_rate"])
+            float(config["learning_rate"]))
 
         self.optimizer = optimizer
         # self.optimizer = hvd.DistributedOptimizer(optimizer)

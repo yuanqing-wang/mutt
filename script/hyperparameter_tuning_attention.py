@@ -133,8 +133,8 @@ class Flow(Trainable):
                 config['conv3_activation']])
 
         self.attention = attention.Attention(
-            config['attention_units'],
-            config['attention_head'])
+            int(config['attention_units']),
+            int(config['attention_head']))
 
         self.encoder4 = conv.ConvNet([
                 'C_%s_%s' % (

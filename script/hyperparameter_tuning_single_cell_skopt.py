@@ -123,7 +123,7 @@ def read_chr(fasta_dir, bigwig_dir, window_width):
         y = tf.convert_to_tensor(y)
         return x, y
 
-    ds = idxs_ds.map(map_idx,
+    ds = idxs_ds.map(map_func,
         num_parallel_calls=N_CPUS)
 
     return ds
@@ -166,33 +166,31 @@ class Flow(object):
                 'C_%s_%s' % (
                     config['conv1_unit'],
                     config['conv1_kernel_size']),
-                config['conv1_activation']])
 
-        self.encoder2 = conv.ConvNet([
+                config['conv1_activation'],
+
                 'C_%s_%s' % (
                     config['conv2_unit'],
                     config['conv2_kernel_size']),
-                config['conv2_activation']])
 
-        self.encoder3 = conv.ConvNet([
+                config['conv2_activation'],
+
+                'D_%s' % config['dropout2'],
+
                 'C_%s_%s' % (
                     config['conv3_unit'],
                     config['conv3_kernel_size']),
-                config['conv3_activation']])
+
+                config['conv3_activation'],
+
+                'D_%s' % config['dropout3'],
+                ])
 
         self.attention = attention.Attention(
-            int(config['attention_units']),
-            int(config['attention_head']))
+            config['attention_units'],
+            config['attention_head'])
 
-        self.encoder4 = conv.ConvNet([
-                'C_%s_%s' % (
-                    config['conv4_unit'],
-                    config['conv4_kernel_size']),
-                config['conv4_activation'],
-                'F',
-                'D_512'])
 
-        self.regression = regression.Regression()
 
         optimizer = tf.train.AdamOptimizer(
             float(config["learning_rate"]))

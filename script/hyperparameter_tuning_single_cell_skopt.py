@@ -161,7 +161,7 @@ class Flow(object):
         global config_keys
 
         config = dict(zip(config_keys, single_config_values))
-
+        print(config)
         self.encoder1 = conv.ConvNet([
                 'C_%s_%s' % (
                     config['conv1_unit'],
@@ -288,6 +288,9 @@ class Flow(object):
                     x = self.encoder4(x)
                     y_bar = self.regression(x)
                     loss = tf.losses.mean_squared_error(ys, y_bar)
+                    print(ys)
+                    print(y_bar)
+                    print(loss)
 
                 # backprop
                 variables = self.encoder1.variables\

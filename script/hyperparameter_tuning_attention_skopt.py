@@ -114,7 +114,7 @@ class Flow(object):
         global config_keys
 
         config = dict(zip(config_keys, single_config_values))
-
+        print(config)
         self.encoder1 = conv.ConvNet([
                 'C_%s_%s' % (
                     config['conv1_unit'],
@@ -134,8 +134,8 @@ class Flow(object):
                 config['conv3_activation']])
 
         self.attention = attention.Attention(
-            config['attention_units'],
-            config['attention_head'])
+            int(config['attention_units']),
+            int(config['attention_head']))
 
         self.encoder4 = conv.ConvNet([
                 'C_%s_%s' % (
@@ -148,12 +148,12 @@ class Flow(object):
         self.regression = regression.Regression()
 
         optimizer = tf.train.AdamOptimizer(
-            config["learning_rate"])
+            float(config["learning_rate"]))
         
         self.optimizer = optimizer
         # self.optimizer = hvd.DistributedOptimizer(optimizer)
 
-    def _setup(self, config_values):
+    def _setup(self, single_config_values):
         """
         define models with parameters
 
@@ -167,7 +167,7 @@ class Flow(object):
 
         # init iteration
         self.iteration = 0
-        self.build(config_values)
+        self.single_config_values = single_config_values
 
         # get sample size
         self.n_sample = df.shape[0]
@@ -192,11 +192,11 @@ class Flow(object):
         y_all = tf.div(y_all - y_mean, tf.sqrt(y_var))
 
         # put into ds
-        ds = tf.data.Dataset.from_tensor_slices((x_all, y_all))
-        # ds = ds.batch(128, True)
-        # ds = ds.shuffle(y_tr.shape[0])
-        self.ds = ds # point ds to class ref
+        ds_all = tf.data.Dataset.from_tensor_slices((x_all, y_all))
+        n_global_te = int(0.2 * self.n_sample)
 
+        self.ds = ds_all.skip(n_global_te)
+        self.global_te_ds = ds_all.take(n_global_te)
 
     def _train(self):
         """
@@ -206,18 +206,23 @@ class Flow(object):
         global df
 
         # init r2
-        r2s = []
+        r2s_te = []
+        r2s_tr = []
+        r2s_global_te = []
 
         # =====================================================================
         # data preparation
         # =====================================================================
 
         # split
-        n_te = int(0.2 * self.n_sample)
+        n_te = int(0.2 * 0.8 * self.n_sample)
         ds = self.ds.shuffle(self.n_sample)
 
         # five fold cross-validation
         for idx in range(5):
+            # rebuild every time
+            self.build(self.single_config_values)
+
             # test: [idx * n_te: (idx + 1) * n_te]
             # train : [0: idx * n_te, (idx + 1) * n_te:]
             ds_tr = ds.take(idx * n_te).concatenate(
@@ -232,38 +237,67 @@ class Flow(object):
             # train for a batch
             # ~~~~~~~~~~~~~~~~~
             # enumerate
+            
+            for dummy_idx in range(50):
+                for batch, (xs, ys) in enumerate(ds_tr):
+                    with tf.GradientTape(persistent=True) as tape: # grad tape
+                        # flow
+                        x = self.encoder1(xs)
+                        x = self.encoder2(x)
+                        x = self.encoder3(x)
+                        x = self.attention(x, x)
+                        x = self.encoder4(x)
+                        y_bar = self.regression(x)
+                        loss = tf.losses.mean_squared_error(ys, y_bar)
+                    
+                    # backprop
+                    variables = self.encoder1.variables\
+                        + self.attention.variables\
+                        + self.encoder2.variables\
+                        + self.encoder3.variables\
+                        + self.encoder4.variables\
+                        + self.regression.variables
 
-            for batch, (xs, ys) in enumerate(ds_tr):
-                with tf.GradientTape(persistent=True) as tape: # grad tape
-                    # flow
-                    x = self.encoder1(xs)
-                    x = self.encoder2(x)
-                    x = self.encoder3(x)
-                    x = self.attention(x, x)
-                    x = self.encoder4(x)
-                    y_bar = self.regression(x)
-                    loss = tf.losses.mean_squared_error(ys, y_bar)
+                    gradients = tape.gradient(loss, variables)
 
-                # backprop
-                variables = self.encoder1.variables\
-                    + self.attention.variables\
-                    + self.encoder2.variables\
-                    + self.encoder3.variables\
-                    + self.encoder4.variables\
-                    + self.regression.variables
+                    self.optimizer.apply_gradients(
+                        zip(gradients, variables),
+                        tf.train.get_or_create_global_step())
 
-                gradients = tape.gradient(loss, variables)
+                # increment
+                self.iteration += 1
 
-                self.optimizer.apply_gradients(
-                    zip(gradients, variables),
-                    tf.train.get_or_create_global_step())
+            # ~~~~~~~~~~~~~~~~~~
+            # test on train data
+            # ~~~~~~~~~~~~~~~~~~
+            # init
+            y_true = None
+            y_pred = None
+            for batch, (xs, ys) in enumerate(ds_tr): # loop through test data
+                x = self.encoder1(xs)
+                x = self.encoder2(x)
+                x = self.encoder3(x)
+                x = self.attention(x, x)
+                x = self.encoder4(x)
+                y_bar = self.regression(x)
 
-            # increment
-            self.iteration += 1
+                # put results in the array
+                if type(y_true) == type(None):
+                    y_true = ys.numpy()
+                else:
+                    y_true = np.concatenate([y_true, ys], axis=0)
 
-            # ~~~~
-            # test
-            # ~~~~
+                if type(y_pred) == type(None):
+                    y_pred = y_bar.numpy()
+                else:
+                    y_pred = np.concatenate([y_pred, y_bar], axis=0)
+
+            for idx in range(y_true.shape[1]):
+                r2s_tr.append(r2_score(y_true[:, idx], y_pred[:, idx]))
+
+            # ~~~~~~~~~~~~~~~~~~
+            # test on train data
+            # ~~~~~~~~~~~~~~~~~~
             # init
             y_true = None
             y_pred = None
@@ -287,9 +321,43 @@ class Flow(object):
                     y_pred = np.concatenate([y_pred, y_bar], axis=0)
 
             for idx in range(y_true.shape[1]):
-                r2s.append(r2_score(y_true[:, idx], y_pred[:, idx]))
+                r2s_te.append(r2_score(y_true[:, idx], y_pred[:, idx]))
 
-        return np.mean(r2s)
+            # ~~~~~~~~~~~~~~~~~~~~~~~~
+            # test on global test data
+            # ~~~~~~~~~~~~~~~~~~~~~~~~
+            # init
+            y_true = None
+            y_pred = None
+            for batch, (xs, ys) in enumerate(self.global_te_ds): # loop through test data
+                x = self.encoder1(xs)
+                x = self.encoder2(x)
+                x = self.encoder3(x)
+                x = self.attention(x, x)
+                x = self.encoder4(x)
+                y_bar = self.regression(x)
+
+                # put results in the array
+                if type(y_true) == type(None):
+                    y_true = ys.numpy()
+                else:
+                    y_true = np.concatenate([y_true, ys], axis=0)
+
+                if type(y_pred) == type(None):
+                    y_pred = y_bar.numpy()
+                else:
+                    y_pred = np.concatenate([y_pred, y_bar], axis=0)
+
+            for idx in range(y_true.shape[1]):
+                r2s_global_te.append(r2_score(y_true[:, idx], y_pred[:, idx]))
+        
+
+        print('train r^2 %s' % np.mean(r2s_tr), flush=True)
+        print('test r^2 %s' % np.mean(r2s_te), flush=True)
+        print('global test r^2 %s' % np.mean(r2s_global_te),
+            flush=True)
+
+        return np.mean(r2s_te)
 
     def _save(self, checkpoint_dir):
 
@@ -368,10 +436,15 @@ if __name__ == "__main__":
     # data preparation
     # =========================================================================
     df = pd.read_csv('ImmGenATAC18_AllOCRsInfo.csv')
-    df = df[df['chrom'] == 'chr1']
-    record = SeqIO.read('chr1.fa', 'fasta')
-    df['seq'] = df['Summit'].apply(
-        lambda x: summit2seq(record, x, width=250))
+    # df = df[df['chrom'] == 'chr1']
+    df['seq'] = df['Summit'].apply(lambda x: 'O')
+
+    chr_names = list(set(df['chrom'].values.tolist()))
+    for chr_name in chr_names: # loop
+        record = SeqIO.read('data/fasta/' + chr_name + '.fa', 'fasta')
+        df['seq'] = df.apply(lambda x: summit2seq(record, x['Summit'])\
+            if x['chrom'] == chr_name else x['seq'],
+            axis=1)
 
 
     # =========================================================================

@@ -51,6 +51,7 @@ import uuid
 import os
 import tempfile
 import shutil
+import time
 
 # module
 from mutt import *
@@ -114,7 +115,6 @@ class Flow(object):
         global config_keys
 
         config = dict(zip(config_keys, single_config_values))
-        print(config)
         self.encoder1 = conv.ConvNet([
                 'C_%s_%s' % (
                     config['conv1_unit'],
@@ -164,11 +164,14 @@ class Flow(object):
         """
 
         global df
+        global config_keys
 
         # init iteration
         self.iteration = 0
         self.single_config_values = single_config_values
 
+        config = dict(zip(config_keys, single_config_values))
+        print(config)
         # get sample size
         self.n_sample = df.shape[0]
 
@@ -196,7 +199,7 @@ class Flow(object):
         n_global_te = int(0.2 * self.n_sample)
 
         self.ds = ds_all.skip(n_global_te)
-        self.global_te_ds = ds_all.take(n_global_te)
+        self.global_te_ds = ds_all.take(n_global_te).batch(128, True)
 
     def _train(self):
         """
@@ -515,7 +518,10 @@ if __name__ == "__main__":
     def obj_func(single_config_values):
         flow = Flow()
         flow._setup(single_config_values)
+        time0 = time.time()
         r2 = flow._train()
+        time1 = time.time()
+        print(time1 - time0)
         return -r2
 
     gp_minimize(

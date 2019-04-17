@@ -196,6 +196,7 @@ class Flow(object):
 
         # put into ds
         ds_all = tf.data.Dataset.from_tensor_slices((x_all, y_all))
+        ds_all = ds_all.shuffle(self.n_sample)
         n_global_te = int(0.2 * self.n_sample)
 
         self.ds = ds_all.skip(n_global_te)
@@ -326,34 +327,62 @@ class Flow(object):
             for idx in range(y_true.shape[1]):
                 r2s_te.append(r2_score(y_true[:, idx], y_pred[:, idx]))
 
-            # ~~~~~~~~~~~~~~~~~~~~~~~~
-            # test on global test data
-            # ~~~~~~~~~~~~~~~~~~~~~~~~
-            # init
-            y_true = None
-            y_pred = None
-            for batch, (xs, ys) in enumerate(self.global_te_ds): # loop through test data
-                x = self.encoder1(xs)
-                x = self.encoder2(x)
-                x = self.encoder3(x)
-                x = self.attention(x, x)
-                x = self.encoder4(x)
-                y_bar = self.regression(x)
-
-                # put results in the array
-                if type(y_true) == type(None):
-                    y_true = ys.numpy()
-                else:
-                    y_true = np.concatenate([y_true, ys], axis=0)
-
-                if type(y_pred) == type(None):
-                    y_pred = y_bar.numpy()
-                else:
-                    y_pred = np.concatenate([y_pred, y_bar], axis=0)
-
-            for idx in range(y_true.shape[1]):
-                r2s_global_te.append(r2_score(y_true[:, idx], y_pred[:, idx]))
+        # ~~~~~~~~~~~~~~~~~~~~~~~~
+        # test on global test data
+        # ~~~~~~~~~~~~~~~~~~~~~~~~
+        # init
+        y_true = None
+        y_pred = None
+        self.build(self.single_config_values)
         
+        for dummy_idx in range(50):
+            for batch, (xs, ys) in enumerate(ds):
+                with tf.GradientTape(persistent=True) as tape: # grad tape
+                    # flow
+                    x = self.encoder1(xs)
+                    x = self.encoder2(x)
+                    x = self.encoder3(x)
+                    x = self.attention(x, x)
+                    x = self.encoder4(x)
+                    y_bar = self.regression(x)
+                    loss = tf.losses.mean_squared_error(ys, y_bar)
+                
+                # backprop
+                variables = self.encoder1.variables\
+                    + self.attention.variables\
+                    + self.encoder2.variables\
+                    + self.encoder3.variables\
+                    + self.encoder4.variables\
+                    + self.regression.variables
+
+                gradients = tape.gradient(loss, variables)
+
+                self.optimizer.apply_gradients(
+                    zip(gradients, variables),
+                    tf.train.get_or_create_global_step())
+        
+        for batch, (xs, ys) in enumerate(self.global_te_ds): # loop through test data
+            x = self.encoder1(xs)
+            x = self.encoder2(x)
+            x = self.encoder3(x)
+            x = self.attention(x, x)
+            x = self.encoder4(x)
+            y_bar = self.regression(x)
+
+            # put results in the array
+            if type(y_true) == type(None):
+                y_true = ys.numpy()
+            else:
+                y_true = np.concatenate([y_true, ys], axis=0)
+
+            if type(y_pred) == type(None):
+                y_pred = y_bar.numpy()
+            else:
+                y_pred = np.concatenate([y_pred, y_bar], axis=0)
+
+        for idx in range(y_true.shape[1]):
+            r2s_global_te.append(r2_score(y_true[:, idx], y_pred[:, idx]))
+      
 
         print('train r^2 %s' % np.mean(r2s_tr), flush=True)
         print('test r^2 %s' % np.mean(r2s_te), flush=True)

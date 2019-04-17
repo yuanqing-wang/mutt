@@ -121,7 +121,12 @@ def read_chr(fasta_dir, bigwig_dir, window_width):
         # handle y
         y = bw.values(chr_name, idx, idx+window_width)
         y = tf.convert_to_tensor(y)
-        return x, y
+
+        # handle z
+        z_idx = tf.convert_to_tensor([idx, idx + window_width])
+        z_name = chr_name
+
+        return x, y, z_idx, z_name
 
     ds = idxs_ds.map(map_func,
         num_parallel_calls=N_CPUS)
@@ -139,6 +144,46 @@ def read_chrs(bigwig_dirs, fasta_dirs, window_width):
             ds = ds.concatenate(read_chr(bigwig_dir, fasta_dir))
 
     return ds
+
+@tf.contrib.eager.defun
+def align(y, z_idx, z_name):
+    """ aligh and average y to get an average over a piece of genome
+    """
+
+    # sort
+    _, z_name_unique_idxs = tf.unique(z_name)
+    _, z_idx_unique_idxs = tf.unique(z_idx)
+
+    # assign idx
+    max_chr_length = tf.math.reduce_max(z_idx_unique_idxs)
+    z = z_name_unique_idxs * max_chr_length + z_idx_unique_idxs
+    _, z, z_count = tf.unique_with_count(z)
+
+    # init
+    y_bar = tf.Variable(tf.zeros_like(z_count, dtype=tf.float32))
+
+    # loop through positions
+    idx = tf.constant(0)
+
+    def loop_body(idx):
+        unique_idx = z[idx]
+        y_bar[unique_idx].add(y[idx])
+        return idx + 1
+
+    tf.while_loop(
+        # condition
+        lambda i: tf.less(i, z.shape[0]),
+
+        # body
+        loop_body,
+
+        # vars
+        loop_vars = [idx]
+    )
+
+    y_bar = tf.div(y_bar, z_count)
+
+    return y_bar
 
 # =============================================================================
 # define trainable
@@ -161,7 +206,6 @@ class Flow(object):
         global config_keys
 
         config = dict(zip(config_keys, single_config_values))
-        print(config)
         self.encoder1 = conv.ConvNet([
                 'C_%s_%s' % (
                     config['conv1_unit'],
@@ -190,7 +234,31 @@ class Flow(object):
             config['attention_units'],
             config['attention_head'])
 
+        self.encoder2 = conv.ConvNet([
+                'C_%s_%s' % (
+                    config['conv4_unit'],
+                    config['conv4_kernel_size']),
 
+                config['conv4_activation'],
+
+                'C_%s_%s' % (
+                    config['conv5_unit'],
+                    config['conv5_kernel_size']),
+
+                config['conv5_activation'],
+
+                'D_%s' % config['dropout5'],
+
+                'C_%s_%s' % (
+                    config['conv6_unit'],
+                    config['conv6_kernel_size']),
+
+                config['conv6_activation'],
+
+                'D_%s' % config['dropout6'],
+
+                'C_1_1'
+                ])
 
         optimizer = tf.train.AdamOptimizer(
             float(config["learning_rate"]))
@@ -207,41 +275,16 @@ class Flow(object):
         config : dict
             configuration of hyperparameters
         """
-
-        global df
-
-        # init iteration
-        self.iteration = 0
-        self.build(config_values)
-
-        # get sample size
-        self.n_sample = df.shape[0]
-
-        # get ds
-        x_all = np.array(
-            [[TRANSLATION[ch] for ch in list(seq)] for seq \
-                in df.values[:, -1]\
-                .flatten().tolist()],
-            dtype=np.int32)
-        y_all = np.array(df.values[:, 8:-1],
-            dtype=np.float32)
-
-        # one-hot encoding
-        x_all = tf.one_hot(tf.convert_to_tensor(x_all), 5,
-            dtype=tf.float32)
-        y_all = tf.convert_to_tensor(y_all, dtype=tf.float32)
+        global ds_all
+        global n_sample
 
 
-        # normalize
-        y_mean, y_var = tf.nn.moments(y_all, axes=[0])
-        y_all = tf.div(y_all - y_mean, tf.sqrt(y_var))
+        n_global_te = int(0.2 * n_sample)
+        self.ds = ds_all.skip(n_global_te)
+        self.global_te_ds = ds_all.take(n_global_te)
 
-        # put into ds
-        ds = tf.data.Dataset.from_tensor_slices((x_all, y_all))
-        # ds = ds.batch(128, True)
-        # ds = ds.shuffle(y_tr.shape[0])
-        self.ds = ds # point ds to class ref
-
+        config = dict(zip(config_keys, single_config_values))
+        print(config)
 
     def _train(self):
         """
@@ -278,66 +321,137 @@ class Flow(object):
             # ~~~~~~~~~~~~~~~~~
             # enumerate
 
-            for batch, (xs, ys) in enumerate(ds_tr):
-                with tf.GradientTape(persistent=True) as tape: # grad tape
-                    # flow
-                    x = self.encoder1(xs)
-                    x = self.encoder2(x)
-                    x = self.encoder3(x)
-                    x = self.attention(x, x)
-                    x = self.encoder4(x)
-                    y_bar = self.regression(x)
-                    loss = tf.losses.mean_squared_error(ys, y_bar)
-                    print(ys)
-                    print(y_bar)
-                    print(loss)
+            for dummy_idx in range(50):
+                for batch, (xs, ys, _, _) in enumerate(ds_tr):
+                    with tf.GradientTape(persistent=True) as tape: # grad tape
+                        # flow
+                        x = self.encoder1(xs)
+                        x = self.attention(x, x)
+                        y_bar = self.encoder4(x)
+                        loss = tf.losses.mean_squared_error(ys, y_bar)
 
-                # backprop
-                variables = self.encoder1.variables\
-                    + self.attention.variables\
-                    + self.encoder2.variables\
-                    + self.encoder3.variables\
-                    + self.encoder4.variables\
-                    + self.regression.variables
+                    # backprop
+                    variables = self.encoder1.variables\
+                        + self.attention.variables\
+                        + self.encoder2.variables\
 
-                gradients = tape.gradient(loss, variables)
+                    gradients = tape.gradient(loss, variables)
 
-                self.optimizer.apply_gradients(
-                    zip(gradients, variables),
-                    tf.train.get_or_create_global_step())
+                    self.optimizer.apply_gradients(
+                        zip(gradients, variables),
+                        tf.train.get_or_create_global_step())
 
-            # increment
-            self.iteration += 1
+                # increment
+                self.iteration += 1
 
-            # ~~~~
-            # test
-            # ~~~~
+            # ~~~~~~~~~~~~~~~~~~
+            # test on train data
+            # ~~~~~~~~~~~~~~~~~~
             # init
             y_true = None
             y_pred = None
-            for batch, (xs, ys) in enumerate(ds_te): # loop through test data
+            for batch, (xs, ys, z_idx, z_name) in enumerate(ds_tr):
                 x = self.encoder1(xs)
-                x = self.encoder2(x)
-                x = self.encoder3(x)
                 x = self.attention(x, x)
-                x = self.encoder4(x)
-                y_bar = self.regression(x)
+                y_hat = self.encoder2(x)
+
+                y_bar = align(ys, z_idx, z_name)
+                y_bar_hat = align(y_hat, z_idx, z_name)
 
                 # put results in the array
                 if type(y_true) == type(None):
                     y_true = ys.numpy()
                 else:
-                    y_true = np.concatenate([y_true, ys], axis=0)
+                    y_true = np.concatenate([y_true, y_bar], axis=0)
 
                 if type(y_pred) == type(None):
                     y_pred = y_bar.numpy()
                 else:
-                    y_pred = np.concatenate([y_pred, y_bar], axis=0)
+                    y_pred = np.concatenate([y_pred, y_bar_hat], axis=0)
 
             for idx in range(y_true.shape[1]):
-                r2s.append(r2_score(y_true[:, idx], y_pred[:, idx]))
+                r2s_tr.append(r2_score(y_true[:, idx], y_pred[:, idx]))
 
-        return np.mean(r2s)
+            # ~~~~~~~~~~~~~~~~~
+            # test on test data
+            # ~~~~~~~~~~~~~~~~~
+            # init
+            y_true = None
+            y_pred = None
+            for batch, (xs, ys, z_idx, z_name) in enumerate(ds_te):
+                x = self.encoder1(xs)
+                x = self.attention(x, x)
+                y_hat = self.encoder2(x)
+
+                y_bar = align(ys, z_idx, z_name)
+                y_bar_hat = align(y_hat, z_idx, z_name)
+
+                # put results in the array
+                if type(y_true) == type(None):
+                    y_true = ys.numpy()
+                else:
+                    y_true = np.concatenate([y_true, y_bar], axis=0)
+
+                if type(y_pred) == type(None):
+                    y_pred = y_bar.numpy()
+                else:
+                    y_pred = np.concatenate([y_pred, y_bar_hat], axis=0)
+
+            for idx in range(y_true.shape[1]):
+                r2s_te.append(r2_score(y_true[:, idx], y_pred[:, idx]))
+
+
+            for dummy_idx in range(50):
+                for batch, (xs, ys, _, _) in enumerate(ds):
+                    with tf.GradientTape(persistent=True) as tape: # grad tape
+                        # flow
+                        x = self.encoder1(xs)
+                        x = self.attention(x, x)
+                        y_bar = self.encoder4(x)
+                        loss = tf.losses.mean_squared_error(ys, y_bar)
+
+                    # backprop
+                    variables = self.encoder1.variables\
+                        + self.attention.variables\
+                        + self.encoder2.variables\
+
+                    gradients = tape.gradient(loss, variables)
+
+                    self.optimizer.apply_gradients(
+                        zip(gradients, variables),
+                        tf.train.get_or_create_global_step())
+                        
+            # ~~~~~~~~~~~~~~~~~~~~~~~~
+            # test on global test data
+            # ~~~~~~~~~~~~~~~~~~~~~~~~
+            # init
+            y_true = None
+            y_pred = None
+            for batch, (xs, ys) in enumerate(self.global_te_ds): # loop through test data
+                x = self.encoder1(xs)
+                x = self.attention(x, x)
+                y_hat = self.encoder2(x)
+
+                y_bar = align(ys, z_idx, z_name)
+                y_bar_hat = align(y_hat, z_idx, z_name)
+
+                # put results in the array
+                if type(y_true) == type(None):
+                    y_true = ys.numpy()
+                else:
+                    y_true = np.concatenate([y_true, y_bar], axis=0)
+
+                if type(y_pred) == type(None):
+                    y_pred = y_bar.numpy()
+                else:
+                    y_pred = np.concatenate([y_pred, y_bar_hat], axis=0)
+
+        print('train r^2 %s' % np.mean(r2s_tr), flush=True)
+        print('test r^2 %s' % np.mean(r2s_te), flush=True)
+        print('global test r^2 %s' % np.mean(r2s_global_te),
+            flush=True)
+
+        return np.mean(r2s_te)
 
     def _save(self, checkpoint_dir):
 
@@ -434,15 +548,10 @@ if __name__ == "__main__":
         # architecture specs
         # ~~~~~~~~~~~~~~~~~~
 
-        # conv before attention
         # conv1
         "conv1_unit": s([64, 128, 256]),
         "conv1_kernel_size": s([4, 6, 8, 10, 12]),
         "conv1_activation": s(['sigmoid', 'tanh', 'elu']),
-
-        # attention
-        "attention_units": s([64, 128, 256, 512]),
-        "attention_head": s([4, 8, 16]),
 
         # conv after attention
         # conv2
@@ -455,24 +564,30 @@ if __name__ == "__main__":
         "conv3_kernel_size": s([4, 6, 8, 10, 12]),
         "conv3_activation": s(['sigmoid', 'tanh', 'elu']),
 
+        # drop3
+        "dropout3": s([0.2, 0.3, 0.4, 0.5]),
+
+        # attention
+        "attention_units": s([64, 128, 256]),
+        "attention_head": s([4, 8, 16])
+
         # conv4
-        # with dilation
         "conv4_unit": s([64, 128, 256]),
         "conv4_kernel_size": s([4, 6, 8, 10, 12]),
-        "conv4_dilation_rate": s([1, 2, 4, 8]),
         "conv4_activation": s(['sigmoid', 'tanh', 'elu']),
 
-        # flatten layer here
+        # conv5
+        "conv4_unit": s([64, 128, 256]),
+        "conv4_kernel_size": s([4, 6, 8, 10, 12]),
+        "conv4_activation": s(['sigmoid', 'tanh', 'elu']),
 
-        # d1
-        "d1_units": s([64, 128, 256, 512, 1024]),
-        "d1_activation": s(['sigmoid', 'tanh', 'elu']),
-        "d1_dropout": s([0.10, 0.20, 0.30, 0.40]),
+        # conv6
+        "conv4_unit": s([64, 128, 256]),
+        "conv4_kernel_size": s([4, 6, 8, 10, 12]),
+        "conv4_activation": s(['sigmoid', 'tanh', 'elu']),
 
-        # d1
-        "d2_units": s([64, 128, 256, 512, 1024]),
-        "d2_activation": s(['sigmoid', 'tanh', 'elu']),
-        "d2_dropout": s([0.10, 0.20, 0.30, 0.40]),
+        # drop6
+        "dropout6": s([0.2, 0.3, 0.4, 0.5]),
 
         # ~~~~~~~~~~~~~~
         # learning specs

@@ -420,7 +420,7 @@ class Flow(object):
                     self.optimizer.apply_gradients(
                         zip(gradients, variables),
                         tf.train.get_or_create_global_step())
-                        
+
             # ~~~~~~~~~~~~~~~~~~~~~~~~
             # test on global test data
             # ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -529,8 +529,6 @@ if __name__ == "__main__":
     # =========================================================================
     # data preparation
     # =========================================================================
-    fasta_dir = 'chr1.fa' # specify fasta
-
 
 
     # =========================================================================
@@ -544,6 +542,11 @@ if __name__ == "__main__":
     # =========================================================================
 
     config_ = {
+        # ~~~~~~~~~~
+        # data specs
+        # ~~~~~~~~~~
+        "window_width": s([128, 256, 512, 1024, 2048, 4096]),
+
         # ~~~~~~~~~~~~~~~~~~
         # architecture specs
         # ~~~~~~~~~~~~~~~~~~
@@ -600,6 +603,10 @@ if __name__ == "__main__":
     config_keys = config_.keys()
 
     def obj_func(single_config_values):
+        ds = read_chrs(
+            'data/bigwig',
+            'data/fasta',
+            int(single_config_values[0]))
         flow = Flow()
         flow._setup(single_config_values)
         r2 = flow._train()

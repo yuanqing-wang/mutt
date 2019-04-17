@@ -149,7 +149,7 @@ class Flow(object):
 
         optimizer = tf.train.AdamOptimizer(
             float(config["learning_rate"]))
-        
+
         self.optimizer = optimizer
         # self.optimizer = hvd.DistributedOptimizer(optimizer)
 
@@ -230,8 +230,8 @@ class Flow(object):
             # test: [idx * n_te: (idx + 1) * n_te]
             # train : [0: idx * n_te, (idx + 1) * n_te:]
             ds_tr = ds.take(idx * n_te).concatenate(
-                ds.skip((idx + 1) * n_te).take((4 - idx) * n_te))
-            ds_te = ds.skip(idx * n_te).take((idx + 1) * n_te)
+                ds.skip((idx + 1) * n_te))
+            ds_te = ds.skip(idx * n_te).take(n_te)
 
             # batch ds
             ds_tr = ds_tr.batch(128, True)
@@ -241,7 +241,7 @@ class Flow(object):
             # train for a batch
             # ~~~~~~~~~~~~~~~~~
             # enumerate
-            
+
             for dummy_idx in range(50):
                 for batch, (xs, ys) in enumerate(ds_tr):
                     with tf.GradientTape(persistent=True) as tape: # grad tape
@@ -253,7 +253,7 @@ class Flow(object):
                         x = self.encoder4(x)
                         y_bar = self.regression(x)
                         loss = tf.losses.mean_squared_error(ys, y_bar)
-                    
+
                     # backprop
                     variables = self.encoder1.variables\
                         + self.attention.variables\
@@ -334,7 +334,7 @@ class Flow(object):
         y_true = None
         y_pred = None
         self.build(self.single_config_values)
-        
+
         for dummy_idx in range(50):
             for batch, (xs, ys) in enumerate(ds):
                 with tf.GradientTape(persistent=True) as tape: # grad tape
@@ -346,7 +346,7 @@ class Flow(object):
                     x = self.encoder4(x)
                     y_bar = self.regression(x)
                     loss = tf.losses.mean_squared_error(ys, y_bar)
-                
+
                 # backprop
                 variables = self.encoder1.variables\
                     + self.attention.variables\
@@ -360,7 +360,7 @@ class Flow(object):
                 self.optimizer.apply_gradients(
                     zip(gradients, variables),
                     tf.train.get_or_create_global_step())
-        
+
         for batch, (xs, ys) in enumerate(self.global_te_ds): # loop through test data
             x = self.encoder1(xs)
             x = self.encoder2(x)
@@ -382,7 +382,7 @@ class Flow(object):
 
         for idx in range(y_true.shape[1]):
             r2s_global_te.append(r2_score(y_true[:, idx], y_pred[:, idx]))
-      
+
 
         print('train r^2 %s' % np.mean(r2s_tr), flush=True)
         print('test r^2 %s' % np.mean(r2s_te), flush=True)

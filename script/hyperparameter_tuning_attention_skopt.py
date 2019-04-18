@@ -277,6 +277,10 @@ class Flow(object):
             # init
             y_true = None
             y_pred = None
+            
+            # switch
+            self.encoder4.switch(True)
+
             for batch, (xs, ys) in enumerate(ds_tr): # loop through test data
                 x = self.encoder1(xs)
                 x = self.encoder2(x)
@@ -334,7 +338,8 @@ class Flow(object):
         y_true = None
         y_pred = None
         self.build(self.single_config_values)
-
+        
+        ds = ds.batch(128, True)
         for dummy_idx in range(50):
             for batch, (xs, ys) in enumerate(ds):
                 with tf.GradientTape(persistent=True) as tape: # grad tape
@@ -361,6 +366,8 @@ class Flow(object):
                     zip(gradients, variables),
                     tf.train.get_or_create_global_step())
 
+        self.encoder4.switch(True)
+        time0 = time.time()
         for batch, (xs, ys) in enumerate(self.global_te_ds): # loop through test data
             x = self.encoder1(xs)
             x = self.encoder2(x)
@@ -380,10 +387,17 @@ class Flow(object):
             else:
                 y_pred = np.concatenate([y_pred, y_bar], axis=0)
 
+        time1 = time.time()
         for idx in range(y_true.shape[1]):
             r2s_global_te.append(r2_score(y_true[:, idx], y_pred[:, idx]))
 
-
+        print('training time %s') % (time1 - time0)
+        print('# of params') % (self.encoder1.count_params()\
+            + self.encoder2.count_params()\
+            + self.encoder3.count_params()\
+            + self.attention.count_params()\
+            + self.encoder4.count_params()\
+            + self.regression.count_params())
         print('train r^2 %s' % np.mean(r2s_tr), flush=True)
         print('test r^2 %s' % np.mean(r2s_te), flush=True)
         print('global test r^2 %s' % np.mean(r2s_global_te),

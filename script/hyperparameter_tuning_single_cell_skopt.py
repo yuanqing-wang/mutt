@@ -79,37 +79,55 @@ TRANSLATION = {
 # =============================================================================
 # utility functions
 # =============================================================================
-def read_chr(fasta_dir, bigwig_dir, window_width):
+def read_chr(fasta_path, bigwig_path, window_width):
     """ read the sequence and accesibility of one chromosome
 
     Parameters
     ----------
-    record : SeqIO.record object
-    bw : pyBigWig object
+    fasta_path : str (path)
+        path of fasta
+    bigwig_path : str (path)
+        path of bigwig
+    window_width: int
+        length of window
 
     Returns
     -------
     ds : tf.data.Dataset
         the resulting dataset
+    
+    n_samples : int
+        number of samples
     """
-    chr_name = fasta_dir.split('.')[0]
-
+    chr_name = fasta_path.split('.')[0].split('/')[-1]
+    print(chr_name, flush=True)
     # get the record
-    record = SeqIO.read(fasta_dir, 'fasta')
+    record = SeqIO.read(fasta_path, 'fasta')
 
     # read the accesibility data
-    bw = pyBigWig.open(bigwig_dir)
+    bw = pyBigWig.open(bigwig_path)
 
     # handle the idxs
     seq_len = len(record)
-    assert seq_len == int(re.findall(str(bw.chroms(chr_name))[0]))
-    idxs = range(len(seq_len - window_width))
-    idxs_ds = tf.data.Dataset.from_tensor_slices(
-        tf.convert_to_tensor(idxs))
+    assert seq_len == int(
+        re.findall(
+          '[0-9]+',
+          str(bw.chroms(chr_name)))[0])
+    
+    idxs = list(range(seq_len))
 
+    idxs_ds = tf.data.Dataset.from_tensor_slices(idxs)
+    
     # define map function
+    # NOTE: don't put decorator here
+    #       because this is actually a python function
     def map_func(idx):
-        # handle x
+        # NOTE:
+        # running with graph is because of
+        # the inconsistency in loading datasets
+        # with TensorFlow
+
+        idx = int(idx)
         x = str(record.seq[idx, idx + window_width])
         x = np.array([TRANSLATION[ch] for ch in list(x)],
             dtype=np.int32)
@@ -128,22 +146,50 @@ def read_chr(fasta_dir, bigwig_dir, window_width):
 
         return x, y, z_idx, z_name
 
-    ds = idxs_ds.map(map_func,
+    ds = idxs_ds.map(lambda x: tf.py_function(
+            map_func,
+            [x],
+            [tf.float32, tf.float32, tf.int32, tf.string]),
         num_parallel_calls=N_CPUS)
 
-    return ds
+    return ds, len(idxs)
 
-def read_chrs(bigwig_dirs, fasta_dirs, window_width):
+def read_chrs(fasta_dirs, bigwig_dirs, window_width):
     """ read data on multiple fasta and sequences
-    """
-    ds = tf.data.Dataset()
 
+    Parameters
+    ----------
+    fasta_dirs : str, path
+        directories of fasta
+    bigwig_dirs : str, path
+        directories of bigwig
+    window_width : int
+        window size
+
+    Returns
+    -------
+    ds : tf.data.Dataset
+        resulting dataset
+    n_samples : int
+        sample size
+    """
+
+    global n_samples
+    ds = None
+    n_samples = 0
     # loop through all the bigwig dirs and all the fasta dirs
     for bigwig_dir in bigwig_dirs:
         for fasta_dir in fasta_dirs:
-            ds = ds.concatenate(read_chr(bigwig_dir, fasta_dir))
+            ds_, length = read_chr(fasta_dir, bigwig_dir,
+                window_width)
+            if type(ds) == type(None):
+                ds = ds_
+            else:
+                ds = ds.concatenate(ds_)
+            
+            n_samples += length
 
-    return ds
+    return ds, n_samples
 
 @tf.contrib.eager.defun
 def align(y, z_idx, z_name):
@@ -276,10 +322,10 @@ class Flow(object):
             configuration of hyperparameters
         """
         global ds_all
-        global n_sample
+        global n_samples
 
 
-        n_global_te = int(0.2 * n_sample)
+        n_global_te = int(0.2 * n_samples)
         self.ds = ds_all.skip(n_global_te)
         self.global_te_ds = ds_all.take(n_global_te)
 
@@ -301,8 +347,10 @@ class Flow(object):
         # =====================================================================
 
         # split
-        n_te = int(0.2 * self.n_sample)
-        ds = self.ds.shuffle(self.n_sample)
+        global n_samples
+
+        n_te = int(0.2 * n_samples)
+        ds = self.ds.shuffle(n_samples)
 
         # five fold cross-validation
         for idx in range(5):
@@ -343,6 +391,7 @@ class Flow(object):
 
                 # increment
                 self.iteration += 1
+
 
             # ~~~~~~~~~~~~~~~~~~
             # test on train data
@@ -400,7 +449,8 @@ class Flow(object):
             for idx in range(y_true.shape[1]):
                 r2s_te.append(r2_score(y_true[:, idx], y_pred[:, idx]))
 
-
+            
+            time0 = time.time()
             for dummy_idx in range(50):
                 for batch, (xs, ys, _, _) in enumerate(ds):
                     with tf.GradientTape(persistent=True) as tape: # grad tape
@@ -420,6 +470,7 @@ class Flow(object):
                     self.optimizer.apply_gradients(
                         zip(gradients, variables),
                         tf.train.get_or_create_global_step())
+            time1 = time.time()
 
             # ~~~~~~~~~~~~~~~~~~~~~~~~
             # test on global test data
@@ -446,6 +497,9 @@ class Flow(object):
                 else:
                     y_pred = np.concatenate([y_pred, y_bar_hat], axis=0)
 
+        print('training time %s' % (time1 - time0))
+        print('# params' % (self.encoder1.count_params() \
+            self.encoder2.count_params()))
         print('train r^2 %s' % np.mean(r2s_tr), flush=True)
         print('test r^2 %s' % np.mean(r2s_te), flush=True)
         print('global test r^2 %s' % np.mean(r2s_global_te),
@@ -572,7 +626,7 @@ if __name__ == "__main__":
 
         # attention
         "attention_units": s([64, 128, 256]),
-        "attention_head": s([4, 8, 16])
+        "attention_head": s([4, 8, 16]),
 
         # conv4
         "conv4_unit": s([64, 128, 256]),
@@ -603,9 +657,12 @@ if __name__ == "__main__":
     config_keys = config_.keys()
 
     def obj_func(single_config_values):
+        # read dataset
         ds = read_chrs(
-            'data/bigwig',
-            'data/fasta',
+            ['data/fasta/' + dir_ for dir_ in os.listdir('data/fasta')
+                if dir_.endswith('.fa')], # ensure the correct format
+            ['data/bigwig/' + dir_ for dir_ in os.listdir('data/bigwig')
+                if dir_.endswith('.bw')],
             int(single_config_values[0]))
         flow = Flow()
         flow._setup(single_config_values)

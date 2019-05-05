@@ -561,9 +561,7 @@ if __name__ == "__main__":
     def obj_func(single_config_values):
         flow = Flow()
         flow._setup(single_config_values)
-        time0 = time.time()
         r2 = flow._train()
-        time1 = time.time()
         print(time1 - time0)
         return -r2
 

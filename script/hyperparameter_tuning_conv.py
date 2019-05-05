@@ -35,8 +35,11 @@ SOFTWARE.
 # =============================================================================
 # infrastructure
 from __future__ import absolute_import
-from skopt import gp_minimize
-from skopt.space import Categorical
+import ray
+import ray.tune as tune
+from ray.tune import grid_search, Trainable, sample_from
+from ray.tune.schedulers import *
+from ray.tune.util import pin_in_object_store, get_pinned_object
 import tensorflow as tf
 # import horovod.tensorflow as hvd
 # hvd.init()
@@ -52,8 +55,6 @@ import os
 import tempfile
 import shutil
 import time
-import scipy
-
 # module
 from mutt import *
 
@@ -98,13 +99,13 @@ def summit2seq(record, summit: int, width: int=250):
 # =============================================================================
 # define trainable
 # =============================================================================
-class Flow(object):
+class Flow(Trainable):
     """
     training and evaluating a model with certain configuration
 
     """
 
-    def build(self, single_config_values):
+    def build(self, config):
         """
         build the models with parameters
 
@@ -113,9 +114,6 @@ class Flow(object):
         config : dict
             configuration of hyperparameters
         """
-        global config_keys
-
-        config = dict(zip(config_keys, single_config_values))
         self.encoder1 = conv.ConvNet([
                 'C_%s_%s' % (
                     config['conv1_unit'],
@@ -148,13 +146,13 @@ class Flow(object):
 
         self.regression = regression.Regression()
 
-        optimizer = tf.train.AdamOptimizer(
-            float(config["learning_rate"]))
+        self.optimizer = tf.train.AdamOptimizer(
+            config["learning_rate"])
 
-        self.optimizer = optimizer
         # self.optimizer = hvd.DistributedOptimizer(optimizer)
 
-    def _setup(self, single_config_values):
+
+    def _setup(self, config):
         """
         define models with parameters
 
@@ -163,16 +161,12 @@ class Flow(object):
         config : dict
             configuration of hyperparameters
         """
-
         global df
-        global config_keys
 
         # init iteration
         self.iteration = 0
-        self.single_config_values = single_config_values
+        self.build(config)
 
-        config = dict(zip(config_keys, single_config_values))
-        print(config)
         # get sample size
         self.n_sample = df.shape[0]
 
@@ -196,12 +190,10 @@ class Flow(object):
         y_all = tf.div(y_all - y_mean, tf.sqrt(y_var))
 
         # put into ds
-        ds_all = tf.data.Dataset.from_tensor_slices((x_all, y_all))
-        ds_all = ds_all.shuffle(self.n_sample)
-        n_global_te = int(0.2 * self.n_sample)
-
-        self.ds = ds_all.skip(n_global_te)
-        self.global_te_ds = ds_all.take(n_global_te).batch(128, True)
+        ds = tf.data.Dataset.from_tensor_slices((x_all, y_all))
+        # ds = ds.batch(128, True)
+        # ds = ds.shuffle(y_tr.shape[0])
+        self.ds = ds # point ds to class ref
 
     def _train(self):
         """
@@ -211,36 +203,24 @@ class Flow(object):
         global df
 
         # init r2
-        r2s_te = []
-        r2s_tr = []
-        r2s_global_te = []
-        
-        # r2s_te_p = []
-        # r2s_tr_p = []
-        # r2s_global_te_p = []
+        r2s = []
 
-        # r2s_te_s = []
-        # r2s_tr_s = []
-        # r2s_global_te_s = []
         # =====================================================================
         # data preparation
         # =====================================================================
 
         # split
-        n_te = int(0.2 * 0.8 * self.n_sample)
+        n_te = int(0.2 * self.n_sample)
         ds = self.ds.shuffle(self.n_sample)
 
         # five fold cross-validation
         for idx in range(5):
-            # rebuild every time
-            self.build(self.single_config_values)
-
             # test: [idx * n_te: (idx + 1) * n_te]
             # train : [0: idx * n_te, (idx + 1) * n_te:]
             ds_tr = ds.take(idx * n_te).concatenate(
-                ds.skip((idx + 1) * n_te))
-            ds_te = ds.skip(idx * n_te).take(n_te)
-
+                ds.skip((idx + 1) * n_te).take((4 - idx) * n_te))
+            ds_te = ds.skip(idx * n_te).take((idx + 1) * n_te)
+            
             # batch ds
             ds_tr = ds_tr.batch(128, True)
             ds_te = ds_te.batch(128, True)
@@ -250,122 +230,7 @@ class Flow(object):
             # ~~~~~~~~~~~~~~~~~
             # enumerate
 
-            for dummy_idx in range(50):
-                for batch, (xs, ys) in enumerate(ds_tr):
-                    with tf.GradientTape(persistent=True) as tape: # grad tape
-                        # flow
-                        x = self.encoder1(xs)
-                        x = self.encoder2(x)
-                        x = self.encoder3(x)
-                        x = self.attention(x, x)
-                        x = self.encoder4(x)
-                        y_bar = self.regression(x)
-                        loss = tf.losses.mean_squared_error(ys, y_bar)
-
-                    # backprop
-                    variables = self.encoder1.variables\
-                        + self.attention.variables\
-                        + self.encoder2.variables\
-                        + self.encoder3.variables\
-                        + self.encoder4.variables\
-                        + self.regression.variables
-
-                    gradients = tape.gradient(loss, variables)
-
-                    self.optimizer.apply_gradients(
-                        zip(gradients, variables),
-                        tf.train.get_or_create_global_step())
-
-                # increment
-                self.iteration += 1
-            
-            n_params = 0
-            try:
-                n_params = self.encoder1.count_params()\
-                    + self.encoder2.count_params()\
-                    + self.encoder3.count_params()\
-                    + self.attention.count_params()\
-                    + self.encoder4.count_params()\
-                    + self.regression.count_params()
-            except:
-                pass
-            # ~~~~~~~~~~~~~~~~~~
-            # test on train data
-            # ~~~~~~~~~~~~~~~~~~
-            # init
-            y_true = None
-            y_pred = None
-            
-            # switch
-            self.encoder4.switch(True)
-
-            for batch, (xs, ys) in enumerate(ds_tr): # loop through test data
-                x = self.encoder1(xs)
-                x = self.encoder2(x)
-                x = self.encoder3(x)
-                x = self.attention(x, x)
-                x = self.encoder4(x)
-                y_bar = self.regression(x)
-
-                # put results in the array
-                if type(y_true) == type(None):
-                    y_true = ys.numpy()
-                else:
-                    y_true = np.concatenate([y_true, ys], axis=0)
-
-                if type(y_pred) == type(None):
-                    y_pred = y_bar.numpy()
-                else:
-                    y_pred = np.concatenate([y_pred, y_bar], axis=0)
-
-            for idx in range(y_true.shape[1]):
-                r2s_tr.append(r2_score(y_true[:, idx], y_pred[:, idx]))
-                # r2s_tr_p.append(np.corrcoef(y_true[:, idx], y_pred[:, idx]))
-                # r2s_tr_s.append(
-                #     scipy.stats.spearmanr(
-                #      y_true[:, idx], y_pred[:,idx]))
-            # ~~~~~~~~~~~~~~~~~~
-            # test on train data
-            # ~~~~~~~~~~~~~~~~~~
-            # init
-            y_true = None
-            y_pred = None
-            for batch, (xs, ys) in enumerate(ds_te): # loop through test data
-                x = self.encoder1(xs)
-                x = self.encoder2(x)
-                x = self.encoder3(x)
-                x = self.attention(x, x)
-                x = self.encoder4(x)
-                y_bar = self.regression(x)
-
-                # put results in the array
-                if type(y_true) == type(None):
-                    y_true = ys.numpy()
-                else:
-                    y_true = np.concatenate([y_true, ys], axis=0)
-
-                if type(y_pred) == type(None):
-                    y_pred = y_bar.numpy()
-                else:
-                    y_pred = np.concatenate([y_pred, y_bar], axis=0)
-
-            for idx in range(y_true.shape[1]):
-                r2s_te.append(r2_score(y_true[:, idx], y_pred[:, idx]))
-                # r2s_te_p.append(np.corrcoef(y_true[:, idx], y_pred[:, idx]))
-                # r2s_te_s.append(
-                #     scipy.stats.spearmanr(
-                #       y_true[:, idx], y_pred[:,idx]))
-        # ~~~~~~~~~~~~~~~~~~~~~~~~
-        # test on global test data
-        # ~~~~~~~~~~~~~~~~~~~~~~~~
-        # init
-        y_true = None
-        y_pred = None
-        self.build(self.single_config_values)
-        
-        ds = ds.batch(128, True)
-        for dummy_idx in range(50):
-            for batch, (xs, ys) in enumerate(ds):
+            for batch, (xs, ys) in enumerate(ds_tr):
                 with tf.GradientTape(persistent=True) as tape: # grad tape
                     # flow
                     x = self.encoder1(xs)
@@ -390,62 +255,108 @@ class Flow(object):
                     zip(gradients, variables),
                     tf.train.get_or_create_global_step())
 
-        self.encoder4.switch(True)
-        time0 = time.time()
-        for batch, (xs, ys) in enumerate(self.global_te_ds): # loop through test data
-            x = self.encoder1(xs)
-            x = self.encoder2(x)
-            x = self.encoder3(x)
-            x = self.attention(x, x)
-            x = self.encoder4(x)
-            y_bar = self.regression(x)
+            # increment
+            self.iteration += 1
 
-            # put results in the array
-            if type(y_true) == type(None):
-                y_true = ys.numpy()
-            else:
-                y_true = np.concatenate([y_true, ys], axis=0)
+            # ~~~~
+            # test
+            # ~~~~
+            # init
+            y_true = None
+            y_pred = None
+            for batch, (xs, ys) in enumerate(ds_te): # loop through test data
+                x = self.encoder1(xs)
+                x = self.attention(x, x)
+                x = self.encoder2(x)
+                x = self.encoder3(x)
+                x = self.encoder4(x)
+                y_bar = self.regression(x)
 
-            if type(y_pred) == type(None):
-                y_pred = y_bar.numpy()
-            else:
-                y_pred = np.concatenate([y_pred, y_bar], axis=0)
+                # put results in the array
+                if type(y_true) == type(None):
+                    y_true = ys.numpy()
+                else:
+                    y_true = np.concatenate([y_true, ys], axis=0)
 
-        time1 = time.time()
-        for idx in range(y_true.shape[1]):
-            r2s_global_te.append(r2_score(y_true[:, idx], y_pred[:, idx]))
-            # r2s_global_te_p.append(np.corrcoef(y_true[:, idx], y_pred[:, idx]))
-            # r2s_global_te_s.append(
-            #     scipy.stats.spearmanr(
-            #      y_true[:, idx], y_pred[:,idx]))
+                if type(y_pred) == type(None):
+                    y_pred = y_bar.numpy()
+                else:
+                    y_pred = np.concatenate([y_pred, y_bar], axis=0)
 
+            for idx in range(y_true.shape[1]):
+                r2s.append(r2_score(y_true[:, idx], y_pred[:, idx]))
 
-        try:
-            print('training time %s') % (time1 - time0)
-        except:
-            pass
+        return {"r2": np.mean(r2s)} # return r2
 
-        print(n_params)
-        print('train r^2 %s' % np.mean(r2s_tr))
-        print('test r^2 %s' % np.mean(r2s_te))
-        print('global test r^2' %np.mean(r2s_global_te))
+    def _save(self, checkpoint_dir):
+        """
+        save the model
 
-        '''
-        print('train r^2 %s, pearson %s, spearman %s' % (
-            np.mean(r2s_tr),
-            np.mean(r2s_tr_p),
-            np.mean(r2s_tr_s)))
-        print('test r^2 %s, pearson %s, spearman %s' % (
-            np.mean(r2s_te),
-            np.mean(r2s_te_p),
-            np.mean(r2s_te_s)))
-        print('global test r^2 %s, pearson %s, spearman %s' % (
-            np.mean(r2s_global_te),
-            np.mean(r2s_global_te_p),
-            np.mean(r2s_global_te_s)))
-        '''
+        Parameters
+        ----------
+        checkpoint_dir : str
+            directory to which the checkpoint is stored
+        """
+        # get a temp path
+        dirpath = tempfile.mkdtemp()
+        os.chdir(dirpath)
+        os.system('mkdir models')
 
-        return np.mean(r2s_te)
+        # save the weights
+        self.encoder1.save_weights(os.path.join(dirpath,
+            'models/encoder1.h5'))
+        self.attention.save_weights(os.path.join(dirpath,
+            'models/attention.h5'))
+        self.encoder2.save_weights(os.path.join(dirpath,
+            'models/encoder2.h5'))
+        self.encoder3.save_weights(os.path.join(dirpath,
+            'models/encoder3.h5'))
+        self.encoder4.save_weights(os.path.join(dirpath,
+            'models/encoder4.h5'))
+        self.regression.save_weights(os.path.join(dirpath,
+            'models/regression.h5'))
+
+        # compress
+        os.system('zip -r models.zip models')
+        os.system('mv models.zip ' + checkpoint_dir)
+
+        # remove the path
+        shutil.rmtree(dirpath)
+
+        # return path
+        return os.path.join(checkpoint_dir, 'models.zip')
+
+    def _restore(self, checkpoint_path):
+        """
+        restore
+
+        Parameters
+        ----------
+        checkpoint_path : str
+            the path of checkpoint
+        """
+        # get a temp path
+        dirpath = tempfile.mkdtemp()
+
+        # unzip
+        os.system('unzip ' + checkpoint_path + ' -d ' + dirpath)
+
+        # init the network
+        self.build()
+
+        # save the weights
+        self.encoder1.load_weights(os.path.join(dirpath,
+            'models/encoder1.h5'))
+        self.attention.load_weights(os.path.join(dirpath,
+            'models/attention.h5'))
+        self.encoder2.load_weights(os.path.join(dirpath,
+            'models/encoder2.h5'))
+        self.encoder3.load_weights(os.path.join(dirpath,
+            'models/encoder3.h5'))
+        self.encoder4.load_weights(os.path.join(dirpath,
+            'models/encoder4.h5'))
+        self.regression.load_weights(os.path.join(dirpath,
+            'models/regression.h5'))
 
 
 if __name__ == "__main__":
@@ -454,28 +365,22 @@ if __name__ == "__main__":
     # data preparation
     # =========================================================================
     df = pd.read_csv('ImmGenATAC18_AllOCRsInfo.csv')
-    # df = df[df['chrom'] == 'chr1']
-    df['seq'] = df['Summit'].apply(lambda x: 'O')
-
-    chr_names = list(set(df['chrom'].values.tolist()))
-    for chr_name in chr_names: # loop
-        record = SeqIO.read('data/fasta/' + chr_name + '.fa', 'fasta')
-        df['seq'] = df.apply(lambda x: summit2seq(record, x['Summit'])\
-            if x['chrom'] == chr_name else x['seq'],
-            axis=1)
-
+    df = df[df['chrom'] == 'chr1']
+    record = SeqIO.read('chr1.fa', 'fasta')
+    df['seq'] = df['Summit'].apply(
+        lambda x: summit2seq(record, x, width=250))
 
     # =========================================================================
     # define search method
     # =========================================================================
-    # s = lambda x: x # for population
+    s = lambda x: x # for population
     # s = tune.grid_search # for grid search
-    s = lambda x: Categorical(x)
+
     # =========================================================================
     # define search space
     # =========================================================================
 
-    config_ = {
+    _config = {
         # ~~~~~~~~~~~~~~~~~~
         # architecture specs
         # ~~~~~~~~~~~~~~~~~~
@@ -505,7 +410,6 @@ if __name__ == "__main__":
         # with dilation
         "conv4_unit": s([64, 128, 256]),
         "conv4_kernel_size": s([4, 6, 8, 10, 12]),
-        "conv4_dilation_rate": s([1, 2, 4, 8]),
         "conv4_activation": s(['sigmoid', 'tanh', 'elu']),
 
         # flatten layer here
@@ -526,19 +430,28 @@ if __name__ == "__main__":
         "learning_rate": s([1e-5, 1e-4])
     }
 
-    # seperate the dict
-    config_values = config_.values()
-    config_keys = config_.keys()
+    # init
+    ray.init(num_gpus=2)
 
-    def obj_func(single_config_values):
-        flow = Flow()
-        flow._setup(single_config_values)
-        r2 = flow._train()
-        return -r2
+    # scheduler
+    pbt_scheduler = PopulationBasedTraining(
+            time_attr='training_iteration',
+            reward_attr='r2',
+            perturbation_interval=10,
+            hyperparam_mutations=_config)
 
-    gp_minimize(
-        func=obj_func,
-        dimensions=config_values,
-        n_calls=1000,
-        n_random_starts=10,
-    )
+    # run
+    tune.run(Flow,
+        name='attention_tuning',
+        scheduler=pbt_scheduler,
+        reuse_actors=True,
+        verbose=True,
+        **{
+            "stop":{
+                "training_iteration":50
+            },
+            "num_samples": 10,
+            "config": dict(
+              [[item[0], item[1][0]] for item in _config.items()]
+              )
+        })

@@ -128,7 +128,7 @@ def read_chr(fasta_path, bigwig_path, window_width):
         # with TensorFlow
 
         idx = int(idx)
-        x = str(record.seq[idx, idx + window_width])
+        x = str(record.seq[idx:idx + window_width])
         x = np.array([TRANSLATION[ch] for ch in list(x)],
             dtype=np.int32)
         x = tf.one_hot(
@@ -146,7 +146,7 @@ def read_chr(fasta_path, bigwig_path, window_width):
 
         return x, y, z_idx, z_name
 
-    ds = idxs_ds.map(lambda x: tf.py_function(
+    ds = idxs_ds.map(lambda x: tf.contrib.eager.py_func(
             map_func,
             [x],
             [tf.float32, tf.float32, tf.int32, tf.string]),
@@ -175,14 +175,14 @@ def read_chrs(fasta_dirs, bigwig_dirs, window_width):
     """
 
     global n_samples
-    ds = None
+    ds = 0
     n_samples = 0
     # loop through all the bigwig dirs and all the fasta dirs
     for bigwig_dir in bigwig_dirs:
         for fasta_dir in fasta_dirs:
             ds_, length = read_chr(fasta_dir, bigwig_dir,
                 window_width)
-            if type(ds) == type(None):
+            if type(ds) == type(0):
                 ds = ds_
             else:
                 ds = ds.concatenate(ds_)
@@ -265,8 +265,6 @@ class Flow(object):
 
                 config['conv2_activation'],
 
-                'D_%s' % config['dropout2'],
-
                 'C_%s_%s' % (
                     config['conv3_unit'],
                     config['conv3_kernel_size']),
@@ -293,8 +291,6 @@ class Flow(object):
 
                 config['conv5_activation'],
 
-                'D_%s' % config['dropout5'],
-
                 'C_%s_%s' % (
                     config['conv6_unit'],
                     config['conv6_kernel_size']),
@@ -312,7 +308,7 @@ class Flow(object):
         self.optimizer = optimizer
         # self.optimizer = hvd.DistributedOptimizer(optimizer)
 
-    def _setup(self, config_values):
+    def _setup(self, single_config_values):
         """
         define models with parameters
 
@@ -331,6 +327,7 @@ class Flow(object):
 
         config = dict(zip(config_keys, single_config_values))
         print(config)
+        self.build(single_config_values)
 
     def _train(self):
         """
@@ -350,7 +347,8 @@ class Flow(object):
         global n_samples
 
         n_te = int(0.2 * n_samples)
-        ds = self.ds.shuffle(n_samples)
+        # ds = self.ds.shuffle(n_samples)
+        ds = self.ds
 
         # five fold cross-validation
         for idx in range(5):
@@ -375,7 +373,7 @@ class Flow(object):
                         # flow
                         x = self.encoder1(xs)
                         x = self.attention(x, x)
-                        y_bar = self.encoder4(x)
+                        y_bar = self.encoder2(x)
                         loss = tf.losses.mean_squared_error(ys, y_bar)
 
                     # backprop
@@ -499,7 +497,7 @@ class Flow(object):
 
         print('training time %s' % (time1 - time0))
         print('# params' % (self.encoder1.count_params() \
-            self.encoder2.count_params()))
+            + self.encoder2.count_params()))
         print('train r^2 %s' % np.mean(r2s_tr), flush=True)
         print('test r^2 %s' % np.mean(r2s_te), flush=True)
         print('global test r^2 %s' % np.mean(r2s_global_te),
@@ -658,10 +656,11 @@ if __name__ == "__main__":
 
     def obj_func(single_config_values):
         # read dataset
-        ds = read_chrs(
-            ['data/fasta/' + dir_ for dir_ in os.listdir('data/fasta')
+        global ds_all
+        ds_all, n_samples = read_chrs(
+            ['data/fasta0/' + dir_ for dir_ in os.listdir('data/fasta0')
                 if dir_.endswith('.fa')], # ensure the correct format
-            ['data/bigwig/' + dir_ for dir_ in os.listdir('data/bigwig')
+            ['data/bigwig0/' + dir_ for dir_ in os.listdir('data/bigwig0')
                 if dir_.endswith('.bw')],
             int(single_config_values[0]))
         flow = Flow()
